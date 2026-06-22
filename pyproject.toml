@@ -1,0 +1,11 @@
+[project]
+name = "comfyui-global-memory-trim"
+version = "0.1.0"
+description = "Global native heap trimming custom node for ComfyUI on Linux/WSL"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "xmarre" }]
+
+[tool.ruff]
+line-length = 120
