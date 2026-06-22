@@ -2,61 +2,68 @@
 
 Global native heap trimming for ComfyUI on Linux/WSL.
 
-This custom node installs a small execution patch when ComfyUI loads custom nodes. The patch can run Python `gc.collect()` and glibc `malloc_trim(0)` before and/or after ComfyUI node execution. It is intended for workflows that repeatedly create large CPU/native image or video buffers through PyTorch, NumPy, OpenCV, Pillow, or custom native code and then stall under WSL2 memory pressure.
+This custom node installs a small global execution patch when ComfyUI loads custom nodes. The patch can run Python garbage collection and glibc `malloc_trim(0)` before and/or after ComfyUI node execution.
 
-The global patch works automatically after installation. You do not need to add a node to your workflow.
+It is mainly intended for WSL2 workflows that repeatedly allocate large CPU-side image/video buffers through PyTorch, NumPy, OpenCV, Pillow, or native custom nodes and then start stalling or wedging due to retained native heap memory.
 
-The package also exposes two optional diagnostic nodes:
+The global patch does **not** require adding any node to your workflow.
 
-- **Global Memory Trim Now**: manually run a trim and return RSS metrics.
-- **Global Memory Trim Status**: show current configuration and the last trim result.
+## What it does
 
-## What this does
+- Optionally runs `gc.collect()`.
+- Calls glibc `malloc_trim(0)` when available.
+- Can trim before nodes, after nodes, or both.
+- Can skip trims until process RSS reaches a configured threshold.
+- Can run every N trim opportunities instead of after every node.
+- Provides manual diagnostic nodes.
 
-On Linux, `malloc_trim(0)` asks glibc to return free heap pages back to the OS. This can help WSL2 recover memory after large temporary CPU/native allocations.
+## What it does not do
 
-This targets **CPU/native heap retention**, not CUDA VRAM.
+This is **not** a VRAM cleanup tool.
 
 It does not directly:
 
-- unload ComfyUI models;
-- clear CUDA VRAM;
-- delete ComfyUI caches;
-- change workflow outputs;
-- fix actual live Python references or live tensors.
+- free CUDA VRAM,
+- unload ComfyUI models,
+- clear ComfyUI model cache,
+- delete workflow outputs,
+- fix CUDA allocator fragmentation,
+- change image generation math.
+
+It only targets CPU/native heap retention.
 
 ## Installation
 
-From your ComfyUI directory:
+Clone into ComfyUI's `custom_nodes` folder:
 
 ```bash
-git clone https://github.com/xmarre/ComfyUI-Global-Memory-Trim custom_nodes/ComfyUI-Global-Memory-Trim
+cd ~/ComfyUI/custom_nodes
+git clone https://github.com/xmarre/ComfyUI-Global-Memory-Trim
 ```
 
-Or copy the folder manually into:
+Restart ComfyUI.
+
+On startup, you should see a line similar to:
 
 ```text
-ComfyUI/custom_nodes/ComfyUI-Global-Memory-Trim
+Installed global memory trim patch: enabled=True before=False after=True ...
 ```
 
-Restart ComfyUI. With logging enabled, startup should show a line similar to:
+## Performance-oriented WSL startup script
 
-```text
-Installed global memory trim patch: enabled=True before=False after=True gc=True interval=1 min_rss_mb=8192 wsl=True
-```
+This is the current performance-oriented WSL setup used for a large ComfyUI workflow with heavy model switching, Flux/SDXL/SeedVR2/detailer passes, and large CPU-side image buffers.
 
-## Performance-oriented WSL setup
+Important details:
 
-This is the current performance-oriented WSL2 launch profile used for a large ComfyUI workflow with heavy model switching, Flux/SDXL/SeedVR2/detailer passes, and large CPU image buffers.
-
-The important points are:
-
-- Keep `--highvram` for performance.
-- Disable ComfyUI async offload and pinned memory on WSL.
-- Do **not** use `--disable-cuda-malloc` in this profile; it caused worse VRAM behavior in this workflow.
-- Keep `PYTORCH_CUDA_ALLOC_CONF` unset.
-- Use glibc trim thresholds plus the global trim hook for CPU/native heap pressure.
-- Keep SeedVR2 BF16 forced on when using the SeedVR2 import-probe workaround and the higher-quality 7B path.
+- Uses `--highvram`.
+- Uses the normal CUDA allocator path.
+- Does **not** use `--disable-cuda-malloc`.
+- Keeps `PYTORCH_CUDA_ALLOC_CONF` unset.
+- Disables async offload and pinned memory, which can be fragile under WSL.
+- Uses glibc trim thresholds for CPU/native heap behavior.
+- Uses global trim after nodes only.
+- Trims every third trim opportunity via `COMFYUI_GLOBAL_TRIM_INTERVAL=3`.
+- Keeps trim logging enabled for validation.
 
 ```bash
 #!/usr/bin/env bash
@@ -83,7 +90,7 @@ export COMFYUI_GLOBAL_TRIM=1
 export COMFYUI_GLOBAL_TRIM_AFTER=1
 export COMFYUI_GLOBAL_TRIM_BEFORE=0
 export COMFYUI_GLOBAL_TRIM_GC=1
-export COMFYUI_GLOBAL_TRIM_INTERVAL=1
+export COMFYUI_GLOBAL_TRIM_INTERVAL=3
 export COMFYUI_GLOBAL_TRIM_LOG=1
 export COMFYUI_GLOBAL_TRIM_MIN_RSS_MB=8192
 
@@ -115,19 +122,114 @@ set -e
 exit "$status"
 ```
 
-### After the setup is validated
+## Notes on the startup flags
 
-`COMFYUI_GLOBAL_TRIM_LOG=1` is useful while verifying that the hook is active, but it creates log spam. Once stable, set:
+### Keep the normal CUDA allocator path
+
+Do not add this flag for the performance-oriented profile:
+
+```bash
+--disable-cuda-malloc
+```
+
+In this WSL setup, forcing the native allocator path caused worse VRAM reservation/overflow behavior. Keeping the normal CUDA allocator path avoided that issue.
+
+Also keep this unset:
+
+```bash
+unset PYTORCH_CUDA_ALLOC_CONF
+```
+
+### Disable async offload and pinned memory on WSL
+
+The performance-oriented profile keeps:
+
+```bash
+--disable-async-offload
+--disable-pinned-memory
+```
+
+These reduce exposure to WSL-sensitive transfer/offload paths. They can reduce some performance benefits, but in this setup they were part of the stable configuration.
+
+### Trim interval
+
+The profile uses:
+
+```bash
+export COMFYUI_GLOBAL_TRIM_INTERVAL=3
+```
+
+This trims less often than every node while still keeping regular heap release pressure.
+
+For more aggressive debugging, use:
+
+```bash
+export COMFYUI_GLOBAL_TRIM_INTERVAL=1
+```
+
+For less overhead, test higher values one at a time:
+
+```bash
+export COMFYUI_GLOBAL_TRIM_INTERVAL=4
+export COMFYUI_GLOBAL_TRIM_INTERVAL=8
+```
+
+### Trim logging
+
+The performance-oriented validation profile uses:
+
+```bash
+export COMFYUI_GLOBAL_TRIM_LOG=1
+```
+
+This is useful while confirming that the hook is active and trimming at the expected interval.
+
+For normal long-term use, turn it off:
 
 ```bash
 export COMFYUI_GLOBAL_TRIM_LOG=0
 ```
 
-Do not change multiple memory-related flags at once. If testing performance changes, change one value per run.
+### Before-node trim
 
-## Conservative diagnostic setup
+The performance-oriented profile uses after-node trim only:
 
-For isolating CPU/native heap stalls, the stricter setup below can be useful. It clamps thread pools and glibc arenas, which may improve WSL stability but can slow CPU-heavy nodes.
+```bash
+export COMFYUI_GLOBAL_TRIM_BEFORE=0
+export COMFYUI_GLOBAL_TRIM_AFTER=1
+```
+
+Before-node trimming is more aggressive and can add overhead. Enable it only for diagnostics or extremely fragile workflows:
+
+```bash
+export COMFYUI_GLOBAL_TRIM_BEFORE=1
+```
+
+## Environment variables
+
+| Variable | Default | Meaning |
+|---|---:|---|
+| `COMFYUI_GLOBAL_TRIM` | `1` | Enable or disable the global execution patch. |
+| `COMFYUI_GLOBAL_TRIM_AFTER` | `1` | Trim after node execution. |
+| `COMFYUI_GLOBAL_TRIM_BEFORE` | `0` | Trim before node execution. More aggressive. |
+| `COMFYUI_GLOBAL_TRIM_GC` | `1` | Run `gc.collect()` before `malloc_trim(0)`. |
+| `COMFYUI_GLOBAL_TRIM_INTERVAL` | `1` | Run trim every N trim opportunities. |
+| `COMFYUI_GLOBAL_TRIM_MIN_RSS_MB` | `0` | Only trim when process RSS is at least this many MB. `0` means always. |
+| `COMFYUI_GLOBAL_TRIM_LOG` | `0` | Log each trim result. Useful for diagnostics, noisy for normal use. |
+| `COMFYUI_GLOBAL_TRIM_WARN_NO_LIBC` | `1` | Warn if glibc `malloc_trim` cannot be loaded. |
+
+## Manual nodes
+
+This extension also provides diagnostic/manual nodes:
+
+- **Global Memory Trim Now**
+- **Global Memory Trim Status**
+
+They are optional. The global patch works without placing these nodes in a workflow.
+
+## Conservative diagnostic profile
+
+For isolating CPU/native heap wedges, a stricter profile can be useful. It is slower and should not be treated as the default performance setup.
 
 ```bash
 export OMP_NUM_THREADS=1
@@ -149,64 +251,7 @@ export COMFYUI_GLOBAL_TRIM_LOG=0
 export COMFYUI_GLOBAL_TRIM_MIN_RSS_MB=8192
 ```
 
-Use this only when the failure looks like CPU/native memory pressure. For normal performance-oriented use, the previous setup is preferred.
-
-## Configuration
-
-All configuration is done through environment variables.
-
-| Variable | Default | Meaning |
-|---|---:|---|
-| `COMFYUI_GLOBAL_TRIM` | `1` | Enable or disable the global patch. |
-| `COMFYUI_GLOBAL_TRIM_AFTER` | `1` | Trim after node execution. |
-| `COMFYUI_GLOBAL_TRIM_BEFORE` | `0` | Trim before node execution. More aggressive; usually leave off unless needed. |
-| `COMFYUI_GLOBAL_TRIM_GC` | `1` | Run `gc.collect()` before `malloc_trim(0)`. |
-| `COMFYUI_GLOBAL_TRIM_INTERVAL` | `1` | Trim every N trim opportunities. Higher values reduce overhead. |
-| `COMFYUI_GLOBAL_TRIM_MIN_RSS_MB` | `0` | Only trim when process RSS is at least this many MB. `0` means no RSS threshold. |
-| `COMFYUI_GLOBAL_TRIM_LOG` | `0` | Log every trim. Useful for validation, noisy during normal use. |
-| `COMFYUI_GLOBAL_TRIM_WARN_NO_LIBC` | `1` | Warn if glibc `malloc_trim` cannot be loaded. |
-
-## Notes on related ComfyUI flags
-
-`--disable-async-offload` and `--disable-pinned-memory` can be useful on WSL when async offload or pinned transfer paths wedge.
-
-`--disable-cuda-malloc` changes CUDA allocator behavior. It is not part of the performance-oriented setup above because it caused worse VRAM behavior in the tested workflow.
-
-`PYTORCH_CUDA_ALLOC_CONF` should remain unset for this profile unless you are deliberately testing allocator behavior.
-
-## Troubleshooting
-
-### Confirm the patch loaded
-
-Enable logging:
-
-```bash
-export COMFYUI_GLOBAL_TRIM_LOG=1
-```
-
-Restart ComfyUI and look for:
-
-```text
-Installed global memory trim patch
-```
-
-During execution, with logging enabled, you should see per-trim status lines.
-
-### If the workflow is stable but logs are noisy
-
-Set:
-
-```bash
-export COMFYUI_GLOBAL_TRIM_LOG=0
-```
-
-### If the workflow still wedges inside a long-running node
-
-The global hook runs before and/or after ComfyUI node execution. If a node wedges internally before returning, the after-node trim will not run. That node may need its own internal chunk/patch-level trimming.
-
-### If CUDA VRAM overflows
-
-This custom node does not directly free CUDA VRAM. Check ComfyUI model/cache/offload settings and CUDA allocator flags instead.
+Use this only when trying to reproduce or isolate CPU/native memory stalls. For normal performance-oriented usage, start with the script above instead.
 
 ## License
 
