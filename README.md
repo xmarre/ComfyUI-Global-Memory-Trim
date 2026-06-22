@@ -46,7 +46,7 @@ Restart ComfyUI.
 On startup, you should see a line similar to:
 
 ```text
-Installed global memory trim patch: enabled=True before=False after=True ...
+Installed global memory trim patch: enabled=True before=True after=True ...
 ```
 
 ## Performance-oriented WSL startup script
@@ -61,7 +61,7 @@ Important details:
 - Keeps `PYTORCH_CUDA_ALLOC_CONF` unset.
 - Disables async offload and pinned memory, which can be fragile under WSL.
 - Uses glibc trim thresholds for CPU/native heap behavior.
-- Uses global trim after nodes only.
+- Uses global trim both before and after nodes.
 - Trims every third trim opportunity via `COMFYUI_GLOBAL_TRIM_INTERVAL=3`.
 - Keeps trim logging enabled for validation.
 
@@ -88,7 +88,7 @@ export MALLOC_TRIM_THRESHOLD_=65536
 
 export COMFYUI_GLOBAL_TRIM=1
 export COMFYUI_GLOBAL_TRIM_AFTER=1
-export COMFYUI_GLOBAL_TRIM_BEFORE=0
+export COMFYUI_GLOBAL_TRIM_BEFORE=1
 export COMFYUI_GLOBAL_TRIM_GC=1
 export COMFYUI_GLOBAL_TRIM_INTERVAL=3
 export COMFYUI_GLOBAL_TRIM_LOG=1
@@ -159,7 +159,7 @@ The profile uses:
 export COMFYUI_GLOBAL_TRIM_INTERVAL=3
 ```
 
-This trims less often than every node while still keeping regular heap release pressure.
+With both before-node and after-node trimming enabled, this avoids trimming on every single opportunity while still applying regular heap release pressure around node boundaries.
 
 For more aggressive debugging, use:
 
@@ -195,7 +195,7 @@ export COMFYUI_GLOBAL_TRIM_LOG=0
 The performance-oriented profile uses after-node trim only:
 
 ```bash
-export COMFYUI_GLOBAL_TRIM_BEFORE=0
+export COMFYUI_GLOBAL_TRIM_BEFORE=1
 export COMFYUI_GLOBAL_TRIM_AFTER=1
 ```
 
@@ -244,7 +244,7 @@ export MALLOC_TRIM_THRESHOLD_=65536
 
 export COMFYUI_GLOBAL_TRIM=1
 export COMFYUI_GLOBAL_TRIM_AFTER=1
-export COMFYUI_GLOBAL_TRIM_BEFORE=0
+export COMFYUI_GLOBAL_TRIM_BEFORE=1
 export COMFYUI_GLOBAL_TRIM_GC=1
 export COMFYUI_GLOBAL_TRIM_INTERVAL=1
 export COMFYUI_GLOBAL_TRIM_LOG=0
